@@ -68,6 +68,76 @@ function Invoke-WebRequestCompat {
   }
 }
 
+# Reliable downloader with real timeouts and fallbacks
+function Download-FileCompat {
+  param(
+    [Parameter(Mandatory=$true)][string]$Url,
+    [Parameter(Mandatory=$true)][string]$OutFile,
+    [int]$TimeoutSec = 180,
+    [switch]$SkipCertificateCheck
+  )
+  Write-Host ("==> Downloading: {0}" -f $Url) -ForegroundColor Cyan
+
+  # 1) Prefer curl.exe if available (has robust timeouts & redirects)
+  if (Test-Command -Name 'curl.exe') {
+    $args = @('-L','--fail','--max-time', $TimeoutSec.ToString(), '-o', $OutFile, $Url)
+    if ($SkipCertificateCheck) { $args = @('-k') + $args }
+    $p = Start-Process -FilePath 'curl.exe' -ArgumentList $args -NoNewWindow -PassThru -Wait
+    if ($p.ExitCode -ne 0) { throw ("curl.exe failed with exit code {0}" -f $p.ExitCode) }
+    if (-not (Test-Path $OutFile)) { throw "curl.exe reported success but file not found: $OutFile" }
+    return
+  }
+
+  # 2) BITS transfer with manual timeout loop
+  if (Test-Command -Name 'Start-BitsTransfer') {
+    try {
+      $job = Start-BitsTransfer -Source $Url -Destination $OutFile -Asynchronous -ErrorAction Stop
+      $sw = [Diagnostics.Stopwatch]::StartNew()
+      do {
+        Start-Sleep -Milliseconds 500
+        try { $job = Get-BitsTransfer -Id $job.Id -ErrorAction Stop } catch { break }
+        if ($sw.Elapsed.TotalSeconds -ge $TimeoutSec) {
+          try { Remove-BitsTransfer -BitsJob $job -ErrorAction SilentlyContinue } catch {}
+          throw "BITS download timed out after $TimeoutSec seconds"
+        }
+      } while ($job.JobState -in @('Connecting','Transferring','Queued','TransientError'))
+      if ($job -and $job.JobState -eq 'Transferred') { Complete-BitsTransfer -BitsJob $job; return }
+      if ($job) { throw ("BITS download failed with state {0}" -f $job.JobState) }
+    } catch {}
+  }
+
+  # 3) .NET HttpWebRequest with timeouts
+  $origCallback = $null
+  if ($SkipCertificateCheck) {
+    $origCallback = [Net.ServicePointManager]::ServerCertificateValidationCallback
+    [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+  }
+  try {
+    $req = [System.Net.HttpWebRequest]::Create($Url)
+    $req.UserAgent = 'TallyProxyBootstrap/1.0'
+    $req.Timeout = $TimeoutSec * 1000
+    $req.ReadWriteTimeout = $TimeoutSec * 1000
+    $req.AllowAutoRedirect = $true
+    $resp = $req.GetResponse()
+    try {
+      $stream = $resp.GetResponseStream()
+      $fs = [System.IO.File]::Open($OutFile, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+      try {
+        $buffer = New-Object byte[] 8192
+        while (($read = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+          $fs.Write($buffer, 0, $read)
+        }
+      } finally { $fs.Dispose() }
+    } finally { $resp.Close() }
+    if (-not (Test-Path $OutFile)) { throw "Download completed but file not found: $OutFile" }
+    return
+  } finally {
+    if ($origCallback) { [Net.ServicePointManager]::ServerCertificateValidationCallback = $origCallback }
+  }
+
+  throw "No available downloader could fetch the file."
+}
+
 # Robust archive extraction across legacy systems
 function Expand-ArchiveCompat {
   param(
@@ -164,7 +234,7 @@ try {
     $zipPath = Join-Path $InstallRoot 'caddy.zip'
 
     try {
-      Invoke-WebRequestCompat -Uri $zipUrl -OutFile $zipPath -TimeoutSec 120
+      Download-FileCompat -Url $zipUrl -OutFile $zipPath -TimeoutSec 180
     } catch {
       Write-Error "Failed to download Caddy from $zipUrl. Error: $_"
       exit 1
@@ -183,7 +253,7 @@ try {
       $ghUrl = "https://github.com/caddyserver/caddy/releases/latest/download/caddy_windows_${arch}.zip"
       Write-Host ("==> Retrying with GitHub asset: {0}" -f $ghUrl) -ForegroundColor Yellow
       try {
-        Invoke-WebRequestCompat -Uri $ghUrl -OutFile $zipPath -TimeoutSec 120
+        Download-FileCompat -Url $ghUrl -OutFile $zipPath -TimeoutSec 180
       } catch {
         Write-Error ("Failed to download from GitHub: {0}" -f $_)
         exit 1
