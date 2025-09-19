@@ -218,55 +218,66 @@ $CaddyfilePath = Join-Path $InstallRoot 'Caddyfile'
 Write-Host "`n==> Preparing install directory at $InstallRoot" -ForegroundColor Cyan
 New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
 
+# --- SkipInstall mode detection -----------------------------------------
+$SkipInstallMode = $false
+if (Test-Path $CaddyExePath) {
+  $SkipInstallMode = $true
+  Write-Host "==> Found caddy.exe at $CaddyExePath; skipping installation." -ForegroundColor Yellow
+}
+
 # --- Install / Update Caddy via Webi (with fallback) ---------------------
-Write-Host "==> Installing/Updating Caddy via Webi ($WebiUrl)" -ForegroundColor Cyan
-$installedViaWebi = $false
-try {
-    $scriptContent = (Invoke-WebRequestCompat -Uri $WebiUrl).Content
-    Invoke-Expression $scriptContent
-    $installedViaWebi = $true
-} catch {
-    Write-Warning "Webi failed ($WebiUrl): $_"
-    Write-Host "==> Falling back to direct download" -ForegroundColor Yellow
+if (-not $SkipInstallMode) {
+  Write-Host "==> Installing/Updating Caddy via Webi ($WebiUrl)" -ForegroundColor Cyan
+  $installedViaWebi = $false
+  try {
+      $scriptContent = (Invoke-WebRequestCompat -Uri $WebiUrl).Content
+      Invoke-Expression $scriptContent
+      $installedViaWebi = $true
+  } catch {
+      Write-Warning "Webi failed ($WebiUrl): $_"
+      Write-Host "==> Falling back to direct download" -ForegroundColor Yellow
 
-    $arch = if ($env:PROCESSOR_ARCHITECTURE -match '64') { 'amd64' } else { '386' }
-    $zipUrl = "https://caddyserver.com/api/download?os=windows&arch=$arch"
-    $zipPath = Join-Path $InstallRoot 'caddy.zip'
+      $arch = if ($env:PROCESSOR_ARCHITECTURE -match '64') { 'amd64' } else { '386' }
+      $zipUrl = "https://caddyserver.com/api/download?os=windows&arch=$arch"
+      $zipPath = Join-Path $InstallRoot 'caddy.zip'
 
-    try {
-      Download-FileCompat -Url $zipUrl -OutFile $zipPath -TimeoutSec 180
-    } catch {
-      Write-Error "Failed to download Caddy from $zipUrl. Error: $_"
-      exit 1
-    }
-
-    $extracted = $false
-    try {
-      Expand-ArchiveCompat -ArchivePath $zipPath -DestinationPath $InstallRoot
-      $extracted = $true
-    } catch {
-      Write-Warning ("Primary extraction failed: {0}" -f $_)
-    }
-
-    if (-not $extracted) {
-      # Try GitHub Releases fallback with a commonly named asset
-      $ghUrl = "https://github.com/caddyserver/caddy/releases/latest/download/caddy_windows_${arch}.zip"
-      Write-Host ("==> Retrying with GitHub asset: {0}" -f $ghUrl) -ForegroundColor Yellow
       try {
-        Download-FileCompat -Url $ghUrl -OutFile $zipPath -TimeoutSec 180
+        Download-FileCompat -Url $zipUrl -OutFile $zipPath -TimeoutSec 180
       } catch {
-        Write-Error ("Failed to download from GitHub: {0}" -f $_)
+        Write-Error "Failed to download Caddy from $zipUrl. Error: $_"
         exit 1
       }
+
+      $extracted = $false
       try {
         Expand-ArchiveCompat -ArchivePath $zipPath -DestinationPath $InstallRoot
+        $extracted = $true
       } catch {
-        Write-Error ("Failed to extract fallback archive: {0}" -f $_)
-        exit 1
+        Write-Warning ("Primary extraction failed: {0}" -f $_)
       }
-    }
 
-    Remove-Item $zipPath -ErrorAction SilentlyContinue
+      if (-not $extracted) {
+        # Try GitHub Releases fallback with a commonly named asset
+        $ghUrl = "https://github.com/caddyserver/caddy/releases/latest/download/caddy_windows_${arch}.zip"
+        Write-Host ("==> Retrying with GitHub asset: {0}" -f $ghUrl) -ForegroundColor Yellow
+        try {
+          Download-FileCompat -Url $ghUrl -OutFile $zipPath -TimeoutSec 180
+        } catch {
+          Write-Error ("Failed to download from GitHub: {0}" -f $_)
+          exit 1
+        }
+        try {
+          Expand-ArchiveCompat -ArchivePath $zipPath -DestinationPath $InstallRoot
+        } catch {
+          Write-Error ("Failed to extract fallback archive: {0}" -f $_)
+          exit 1
+        }
+      }
+
+      Remove-Item $zipPath -ErrorAction SilentlyContinue
+  }
+} else {
+  Write-Host "==> SkipInstall mode active: using existing caddy.exe" -ForegroundColor Yellow
 }
 
 # --- Locate an installed caddy.exe ---------------------------------------
@@ -300,7 +311,11 @@ try {
 }
 
 # --- Copy caddy.exe into InstallRoot -------------------------------------
-Copy-Item -Path $sourceCaddy -Destination $CaddyExePath -Force
+if ($sourceCaddy -and ($sourceCaddy -ne $CaddyExePath)) {
+  Copy-Item -Path $sourceCaddy -Destination $CaddyExePath -Force
+} else {
+  Write-Host "==> caddy.exe already in place at $CaddyExePath; skipping copy." -ForegroundColor Yellow
+}
 try { Unblock-File -Path $CaddyExePath } catch {}
 
 function Test-CaddyServiceFeature {
@@ -404,4 +419,3 @@ try {
 } catch {
   Write-Warning "Could not install local root CA with 'caddy trust'. You may see a browser warning until trusted. $_"
 }
-=
