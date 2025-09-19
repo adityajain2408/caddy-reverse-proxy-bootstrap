@@ -319,12 +319,8 @@ if ($sourceCaddy -and ($sourceCaddy -ne $CaddyExePath)) {
 try { Unblock-File -Path $CaddyExePath } catch {}
 
 function Test-CaddyServiceFeature {
-  try {
-    & $CaddyExePath service --help | Out-Null
-    return $true
-  } catch {
-    return $false
-  }
+  & $CaddyExePath service --help *> $null
+  if ($LASTEXITCODE -eq 0) { return $true } else { return $false }
 }
 
 # --- Write Caddyfile ------------------------------------------------------
@@ -382,7 +378,7 @@ if ($hasCaddyService) {
 }
 
 # ----------------------------- Firewall Rule -----------------------------------------------
-if (Test-Command -Name 'Get-NetFirewallRule' -and Test-Command -Name 'New-NetFirewallRule') {
+if ((Test-Command -Name 'Get-NetFirewallRule') -and (Test-Command -Name 'New-NetFirewallRule')) {
   if (-not (Get-NetFirewallRule -DisplayName $RuleName -ErrorAction SilentlyContinue)) {
       Write-Host "==> Creating Windows Firewall rule for port $ListenPort" -ForegroundColor Cyan
       New-NetFirewallRule `
