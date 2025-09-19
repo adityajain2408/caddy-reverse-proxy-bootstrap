@@ -5,7 +5,7 @@ Optional: skip installer if you already have caddy.exe
 If you can manually place caddy.exe at C:\ProgramData\TallyHttpsProxy\caddy.exe as well if you face anhy download and extraction issues,and the script jumps straight to service setup. 
 
 # how to run
-Run the script as Administrator permissions in PowerShell:
+Run the script as Administrator permissions in PowerShell (not x86):
 powershell -ExecutionPolicy Bypass -File .\static\tools\tally-proxy-bootstrap.ps1
 
 If it sits at “Downloading: …” for more than ~3 minutes, cancel and try this quick network test:
