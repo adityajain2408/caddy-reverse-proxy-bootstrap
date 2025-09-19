@@ -28,11 +28,12 @@ This enables browser code (including service workers) to call Tally from a secur
 
 ## Run
 
-```
+```powershell
 powershell -ExecutionPolicy Bypass -File .\static\tools\tally-proxy-bootstrap.ps1
 ```
 
 After success:
+
 - Visit `https://localhost:8443` (first visit may trigger the local CA creation).
 - In your app (e.g., Loupe), set the Tally host to `https://localhost:8443`.
 
@@ -40,7 +41,7 @@ After success:
 
 If you hit download/extraction issues, place a compatible `caddy.exe` at:
 
-```
+```powershell
 C:\ProgramData\TallyHttpsProxy\caddy.exe
 ```
 
@@ -50,28 +51,28 @@ Then re‑run the script. It will skip the installer and go straight to configur
 
 If the script could not complete trust automatically, you can do it manually. All commands below should run in an elevated PowerShell in `C:\ProgramData\TallyHttpsProxy`.
 
-1) Format and validate the config
+1 Format and validate the config
 
-```
-./caddy.exe fmt --overwrite .\Caddyfile
-./caddy.exe validate --config .\Caddyfile --adapter caddyfile
-```
+  ```powershell
+  ./caddy.exe fmt --overwrite .\Caddyfile
+  ./caddy.exe validate --config .\Caddyfile --adapter caddyfile
+  ```
 
-2) Start Caddy in a console to verify logs
+2 Start Caddy in a console to verify logs
 
-```
-./caddy.exe run --config .\Caddyfile --adapter caddyfile
-```
+  ```powershell
+  ./caddy.exe run --config .\Caddyfile --adapter caddyfile
+  ```
 
 In a second window, confirm the admin API (port echoed by the script, usually 2019):
 
-```
-curl.exe -s http://127.0.0.1:2019/config
-```
+  ```powershell
+  curl.exe -s http://127.0.0.1:2019/config
+  ```
 
-3) Install trust (required for browsers to accept `https://localhost:8443` without warnings)
+3 Install trust (required for browsers to accept `https://localhost:8443` without warnings)
 
-```
+```powershell
 ./caddy.exe trust --config .\Caddyfile --adapter caddyfile
 ```
 
@@ -112,4 +113,3 @@ Edit the top of `static\tools\tally-proxy-bootstrap.ps1` if you need to change d
 ---
 
 If you run into issues, capture the last 50 lines of `C:\ProgramData\TallyHttpsProxy\preflight.log` (if present) or the console output of `caddy run`, and share them for quick guidance.
-
