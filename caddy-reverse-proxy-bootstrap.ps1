@@ -68,6 +68,82 @@ function Invoke-WebRequestCompat {
   }
 }
 
+# --- TCP port probe helper ------------------------------------------------
+function Test-TcpPortOpen {
+  param(
+    [Parameter(Mandatory=$true)][string]$TargetHost,
+    [Parameter(Mandatory=$true)][int]$TargetPort,
+    [int]$TimeoutSec = 10
+  )
+  $sw = [Diagnostics.Stopwatch]::StartNew()
+  while ($sw.Elapsed.TotalSeconds -lt $TimeoutSec) {
+    try {
+      $client = New-Object System.Net.Sockets.TcpClient
+      $iar = $client.BeginConnect($TargetHost, $TargetPort, $null, $null)
+      $ok = $iar.AsyncWaitHandle.WaitOne(500)
+      if ($ok -and $client.Connected) { $client.EndConnect($iar); $client.Close(); return $true }
+      $client.Close()
+    } catch {}
+    Start-Sleep -Milliseconds 300
+  }
+  return $false
+}
+
+# Pick an admin port that's free (try a small list)
+function Select-AdminPort {
+  param([int[]]$Candidates = @(2019,2020,2021,2022))
+  foreach ($p in $Candidates) {
+    # If nothing is listening, prefer this port
+    if (-not (Test-TcpPortOpen -TargetHost '127.0.0.1' -TargetPort $p -TimeoutSec 1)) { return $p }
+  }
+  return $Candidates[0]
+}
+
+function Test-CaddyStartFeature {
+  param([Parameter(Mandatory=$true)][string]$ExePath)
+  $prev = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'
+  try { $null = (& $ExePath 'start' '--help' 2>&1 | Out-Null); return ($LASTEXITCODE -eq 0) } catch { return $false } finally { $ErrorActionPreference = $prev }
+}
+
+# --- Preflight: start Caddy, trust CA, stop --------------------------------
+function Invoke-CaddyPreflightTrust {
+  param(
+    [Parameter(Mandatory=$true)][string]$ExePath,
+    [Parameter(Mandatory=$true)][string]$ConfigPath,
+    [int]$TimeoutSec = 25,
+    [int]$AdminPort
+  )
+  Write-Host "==> Preflight: launching Caddy to install local CA" -ForegroundColor Cyan
+  if (Test-CaddyStartFeature -ExePath $ExePath) {
+    # Use native background mode
+    & $ExePath start --config $ConfigPath --adapter caddyfile *> $null
+    $started = Test-TcpPortOpen -TargetHost '127.0.0.1' -TargetPort $AdminPort -TimeoutSec $TimeoutSec
+    $ok = $false
+    if ($started) {
+      try { & $ExePath trust --config $ConfigPath --adapter caddyfile | Out-Null; $ok = $true } catch { Write-Warning "Preflight: 'caddy trust' failed: $_" }
+    } else {
+      Write-Warning "Preflight: Caddy admin API did not become reachable; skipping trust."
+    }
+    try { & $ExePath stop *> $null } catch {}
+    return $ok
+  } else {
+    # Fallback: run with redirected output and kill after
+    $logPath = Join-Path (Split-Path $ConfigPath -Parent) 'preflight.log'
+    $proc = Start-Process -FilePath $ExePath -ArgumentList @('run','--config', $ConfigPath, '--adapter', 'caddyfile') -RedirectStandardOutput $logPath -RedirectStandardError $logPath -WindowStyle Hidden -PassThru
+    try {
+      $started = Test-TcpPortOpen -TargetHost '127.0.0.1' -TargetPort $AdminPort -TimeoutSec $TimeoutSec
+      if ($started) {
+        try { & $ExePath trust --config $ConfigPath --adapter caddyfile | Out-Null; return $true } catch { Write-Warning "Preflight: 'caddy trust' failed: $_"; return $false }
+      } else {
+        Write-Warning ("Preflight: admin API not reachable; see log {0}" -f $logPath)
+        return $false
+      }
+    } finally {
+      try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue; Wait-Process -Id $proc.Id -Timeout 5 -ErrorAction SilentlyContinue } catch {}
+    }
+  }
+}
+
 # Reliable downloader with real timeouts and fallbacks
 function Download-FileCompat {
   param(
@@ -138,6 +214,36 @@ function Download-FileCompat {
   throw "No available downloader could fetch the file."
 }
 
+# --- Caddyfile formatting and validation helpers -------------------------
+function Invoke-CaddyFmt {
+  param(
+    [Parameter(Mandatory=$true)][string]$ExePath,
+    [Parameter(Mandatory=$true)][string]$ConfigPath
+  )
+  try {
+    & $ExePath fmt --overwrite $ConfigPath | Out-Null
+    Write-Host "==> Formatted Caddyfile" -ForegroundColor Cyan
+    return $true
+  } catch {
+    Write-Warning "Could not format Caddyfile: $_"
+    return $false
+  }
+}
+
+function Invoke-CaddyValidate {
+  param(
+    [Parameter(Mandatory=$true)][string]$ExePath,
+    [Parameter(Mandatory=$true)][string]$ConfigPath
+  )
+  $output = & $ExePath validate --config $ConfigPath --adapter caddyfile 2>&1
+  if ($LASTEXITCODE -ne 0) {
+    $msg = ($output | Out-String).Trim()
+    Write-Error ("Caddy config validation failed. Output:\n{0}" -f $msg)
+    exit 1
+  }
+  Write-Host "==> Caddyfile validated successfully" -ForegroundColor Green
+}
+
 # Robust archive extraction across legacy systems
 function Expand-ArchiveCompat {
   param(
@@ -200,6 +306,8 @@ $ListenPort    = 8443
 $TallyPort     = 9000
 $RuleName      = 'Tally HTTPS Proxy (Caddy)'
 $WebiUrl       = 'https://webi.ms/caddy'
+$didTrust      = $false
+$didTrust      = $false
 
 # Possible locations Webi or other installers may place caddy.exe
 $CandidateCaddyPaths = @(
@@ -319,22 +427,48 @@ if ($sourceCaddy -and ($sourceCaddy -ne $CaddyExePath)) {
 try { Unblock-File -Path $CaddyExePath } catch {}
 
 function Test-CaddyServiceFeature {
-  & $CaddyExePath service --help *> $null
-  if ($LASTEXITCODE -eq 0) { return $true } else { return $false }
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    $null = (& $CaddyExePath 'service' '--help' 2>&1 | Out-Null)
+    return ($LASTEXITCODE -eq 0)
+  } catch {
+    return $false
+  } finally {
+    $ErrorActionPreference = $prev
+  }
 }
 
 # --- Write Caddyfile ------------------------------------------------------
 Write-Host "==> Writing Caddyfile (HTTPS -> HTTP proxy)" -ForegroundColor Cyan
+$AdminPort = Select-AdminPort
+Write-Host ("==> Admin API will listen on 127.0.0.1:{0}" -f $AdminPort) -ForegroundColor Cyan
 @"
+{
+    admin 127.0.0.1:$AdminPort
+}
 https://localhost:$ListenPort {
     tls internal
     reverse_proxy http://127.0.0.1:$TallyPort {
         transport http {
-            versions h1 h2c
+            versions 1.1
         }
     }
 }
 "@ | Set-Content -Path $CaddyfilePath -Encoding utf8
+
+# --- Auto-format and validate the generated Caddyfile --------------------
+Invoke-CaddyFmt -ExePath $CaddyExePath -ConfigPath $CaddyfilePath | Out-Null
+Invoke-CaddyValidate -ExePath $CaddyExePath -ConfigPath $CaddyfilePath
+
+# --- Preflight trust before creating background runner --------------------
+try {
+  if (Invoke-CaddyPreflightTrust -ExePath $CaddyExePath -ConfigPath $CaddyfilePath -TimeoutSec 25 -AdminPort $AdminPort) {
+    $didTrust = $true
+  }
+} catch {
+  Write-Warning "Preflight step encountered an issue: $_"
+}
 
 # --- (Re)Create Windows Service -------------------------------------------
 # ----------------------------- (Re)Create Windows Service ---------------------------------------
@@ -396,22 +530,32 @@ if ((Test-Command -Name 'Get-NetFirewallRule') -and (Test-Command -Name 'New-Net
 }
 
 # --- Final checks / output -----------------------------------------------
-Write-Host "`nAll done! ✅" -ForegroundColor Green
+Write-Host "`nAll done!" -ForegroundColor Green
 Write-Host "Open https://localhost:$ListenPort in your browser to verify." -ForegroundColor Green
-Write-Host "In Loupe, set the Tally host to https://localhost:$ListenPort before pushing vouchers." -ForegroundColor Green
+Write-Host "In Loupe Factory, set the Tally host to https://localhost:$ListenPort before pushing vouchers." -ForegroundColor Green
 
 try {
-    $resp = Invoke-WebRequestCompat -Uri "https://localhost:$ListenPort" -TimeoutSec 5 -SkipCertificateCheck
+    $resp = Invoke-WebRequestCompat -Uri "https://localhost:$ListenPort" -TimeoutSec 10 -SkipCertificateCheck
     Write-Host "`nHealth check: Received HTTP $($resp.StatusCode) from https://localhost:$ListenPort" -ForegroundColor Green
 } catch {
     Write-Warning "Could not fetch https://localhost:$ListenPort yet. If this is the first run, give it a moment or check 'services.msc' for '$ServiceName'."
 }
 
 # ----------------------------- Trust local CA (optional) -----------------------------------------
-try {
-  # Some builds may not have 'trust'. If it errors, we just warn.
-  & $CaddyExePath trust --config $CaddyfilePath --adapter caddyfile | Out-Null
-  Write-Host "==> Installed Caddy's local root CA into Windows trust store (if needed)." -ForegroundColor Green
-} catch {
-  Write-Warning "Could not install local root CA with 'caddy trust'. You may see a browser warning until trusted. $_"
+if (-not $didTrust) {
+  # Only attempt 'caddy trust' once the admin API is reachable
+Write-Host ("==> Waiting for Caddy admin API on 127.0.0.1:{0} before trusting CA" -f $AdminPort) -ForegroundColor Cyan
+if (Test-TcpPortOpen -TargetHost '127.0.0.1' -TargetPort $AdminPort -TimeoutSec 20) {
+    try {
+      & $CaddyExePath trust --config $CaddyfilePath --adapter caddyfile | Out-Null
+      Write-Host "==> Installed Caddy's local root CA into Windows trust store (if needed)." -ForegroundColor Green
+    } catch {
+      Write-Warning "Could not install local root CA with 'caddy trust'. You may see a browser warning until trusted. $_"
+    }
+  } else {
+    Write-Warning ("Caddy admin API is not reachable on 127.0.0.1:{0} yet; skipping 'caddy trust' for now." -f $AdminPort)
+  }
 }
+
+# Final summary: echo chosen admin port
+Write-Host ("Admin API: http://127.0.0.1:{0}" -f $AdminPort) -ForegroundColor Cyan
