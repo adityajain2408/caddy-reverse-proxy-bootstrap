@@ -98,6 +98,40 @@ function Select-AdminPort {
   }
   return $Candidates[0]
 }
+# Polls Windows service state until it is running or a timeout is hit.
+function Wait-ServiceRunning {
+  param(
+    [Parameter(Mandatory=$true)][string]$Name,
+    [int]$TimeoutSec = 30
+  )
+  $sw = [Diagnostics.Stopwatch]::StartNew()
+  while ($sw.Elapsed.TotalSeconds -lt $TimeoutSec) {
+    $svc = $null
+    try {
+      $svc = Get-Service -Name $Name -ErrorAction Stop
+    } catch {
+      Start-Sleep -Milliseconds 500
+      continue
+    }
+    if ($svc.Status -eq 'Running') { return $true }
+    if ($svc.Status -eq 'Stopped') {
+      try { Start-Service -Name $Name -ErrorAction SilentlyContinue } catch {}
+    }
+    Start-Sleep -Milliseconds 500
+  }
+  return $false
+}
+
+function Test-ServiceExists {
+  param([Parameter(Mandatory=$true)][string]$Name)
+  try {
+    Get-Service -Name $Name -ErrorAction Stop | Out-Null
+    return $true
+  } catch {
+    return $false
+  }
+}
+
 
 function Test-CaddyStartFeature {
   param([Parameter(Mandatory=$true)][string]$ExePath)
@@ -476,26 +510,38 @@ try {
 }
 
 # --- (Re)Create Windows Service -------------------------------------------
-# ----------------------------- (Re)Create Windows Service ---------------------------------------
 Write-Host "==> Configuring Windows Service '$ServiceName'" -ForegroundColor Cyan
 
 $hasCaddyService = Test-CaddyServiceFeature
+$serviceInstalled = $false
 
 if ($hasCaddyService) {
-  # Stop/uninstall any existing service via Caddy
   try { & $CaddyExePath service stop --name $ServiceName 2>$null } catch {}
   try { & $CaddyExePath service uninstall --name $ServiceName 2>$null } catch {}
   Start-Sleep -Seconds 1
 
-  # Install & start using Caddy's built-in service manager
-  & $CaddyExePath service install `
+  $installOutput = & $CaddyExePath service install `
     --name   $ServiceName `
     --config $CaddyfilePath `
-    --watchdog-interval 0s
-  & $CaddyExePath service start --name $ServiceName
-} else {
-  # Fallback: use sc.exe (Windows Service Controller)
-  # Stop & delete any previous service
+    --watchdog-interval 0s 2>&1
+  if ($LASTEXITCODE -ne 0) {
+    Write-Warning ("Caddy service install failed (exit {0}). Output: {1}" -f $LASTEXITCODE, ($installOutput -join ' '))
+  } else {
+    $serviceInstalled = Test-ServiceExists -Name $ServiceName
+    if (-not $serviceInstalled) {
+      Write-Warning "Caddy service install completed but service not found; falling back to sc.exe."
+    } else {
+      $startOutput = & $CaddyExePath service start --name $ServiceName 2>&1
+      if ($LASTEXITCODE -ne 0) {
+        Write-Warning ("Caddy service start failed (exit {0}). Output: {1}" -f $LASTEXITCODE, ($startOutput -join ' '))
+        $serviceInstalled = Test-ServiceExists -Name $ServiceName
+      }
+    }
+  }
+}
+
+if (-not $serviceInstalled) {
+  Write-Host "==> Provisioning Windows service via sc.exe" -ForegroundColor Cyan
   $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
   if ($svc) {
     try { sc.exe stop  $ServiceName   | Out-Null } catch {}
@@ -504,16 +550,30 @@ if ($hasCaddyService) {
     Start-Sleep -Seconds 1
   }
 
-  # Build a properly quoted binPath that includes the full command line
   $svcCmd = "`"$CaddyExePath`" run --config `"$CaddyfilePath`" --adapter caddyfile"
-  # Important: sc.exe expects 'binPath= ' and 'start= ' with a space after '=' as part of the same token.
+  $binPathArg = 'binPath="' + $svcCmd + '"'
   $argCreate = @(
     'create', $ServiceName,
-    ('binPath= ' + '"' + $svcCmd + '"'),
-    'start= auto'
+    $binPathArg,
+    'type=own',
+    'start=auto'
   )
-  & sc.exe @argCreate | Out-Null
-  & sc.exe start $ServiceName | Out-Null
+  $createOutput = & sc.exe @argCreate 2>&1
+  if ($LASTEXITCODE -ne 0) {
+    throw ("Failed to create Windows service '{0}' (exit {1}). Output: {2}" -f $ServiceName, $LASTEXITCODE, ($createOutput -join ' '))
+  }
+
+  $serviceInstalled = Test-ServiceExists -Name $ServiceName
+  if (-not $serviceInstalled) {
+    throw ("Service '{0}' was not registered by sc.exe create." -f $ServiceName)
+  }
+
+  $startOutput = & sc.exe start $ServiceName 2>&1
+  if ($LASTEXITCODE -ne 0) {
+    Write-Warning ("sc.exe start returned exit {0}. Output: {1}" -f $LASTEXITCODE, ($startOutput -join ' '))
+  } else {
+    $serviceInstalled = Test-ServiceExists -Name $ServiceName
+  }
 }
 
 # ----------------------------- Firewall Rule -----------------------------------------------
@@ -549,16 +609,27 @@ try {
 # ----------------------------- Trust local CA (optional) -----------------------------------------
 if (-not $didTrust) {
   # Only attempt 'caddy trust' once the admin API is reachable
-Write-Host ("==> Waiting for Caddy admin API on 127.0.0.1:{0} before trusting CA" -f $AdminPort) -ForegroundColor Cyan
-if (Test-TcpPortOpen -TargetHost '127.0.0.1' -TargetPort $AdminPort -TimeoutSec 20) {
-    try {
-      & $CaddyExePath trust --config $CaddyfilePath --adapter caddyfile | Out-Null
-      Write-Host "==> Installed Caddy's local root CA into Windows trust store (if needed)." -ForegroundColor Green
-    } catch {
-      Write-Warning "Could not install local root CA with 'caddy trust'. You may see a browser warning until trusted. $_"
-    }
+  $serviceReady = $false
+  try {
+    $serviceReady = Wait-ServiceRunning -Name $ServiceName -TimeoutSec 30
+  } catch {
+    Write-Warning ("Could not verify Windows service '{0}': {1}" -f $ServiceName, $_)
+  }
+
+  if (-not $serviceReady) {
+    Write-Warning ("Service '{0}' is not running; skipping 'caddy trust' for now." -f $ServiceName)
   } else {
-    Write-Warning ("Caddy admin API is not reachable on 127.0.0.1:{0} yet; skipping 'caddy trust' for now." -f $AdminPort)
+    Write-Host ("==> Waiting for Caddy admin API on 127.0.0.1:{0} before trusting CA" -f $AdminPort) -ForegroundColor Cyan
+    if (Test-TcpPortOpen -TargetHost '127.0.0.1' -TargetPort $AdminPort -TimeoutSec 20) {
+      try {
+        & $CaddyExePath trust --config $CaddyfilePath --adapter caddyfile | Out-Null
+        Write-Host "==> Installed Caddy's local root CA into Windows trust store (if needed)." -ForegroundColor Green
+      } catch {
+        Write-Warning "Could not install local root CA with 'caddy trust'. You may see a browser warning until trusted. $_"
+      }
+    } else {
+      Write-Warning ("Caddy admin API is not reachable on 127.0.0.1:{0} yet; skipping 'caddy trust' for now." -f $AdminPort)
+    }
   }
 }
 
