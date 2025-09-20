@@ -551,7 +551,7 @@ if (-not $serviceInstalled) {
   }
 
   $svcCmd = "`"$CaddyExePath`" run --config `"$CaddyfilePath`" --adapter caddyfile"
-  $binPathArg = 'binPath="' + $svcCmd + '"'
+  $binPathArg = 'binPath=' + $svcCmd
   $argCreate = @(
     'create', $ServiceName,
     $binPathArg,
