@@ -1,4 +1,4 @@
-# Tally HTTPS Proxy bootstrapper
+﻿# Tally HTTPS Proxy bootstrapper
 # ------------------------------
 # Installs Caddy via Webi, configures a local HTTPS endpoint on https://localhost:8443,
 # and reverse-proxies to Tally on http://127.0.0.1:9000.
@@ -145,7 +145,7 @@ function Invoke-CaddyPreflightTrust {
 }
 
 # Reliable downloader with real timeouts and fallbacks
-function Download-FileCompat {
+function Get-FileCompat {
   param(
     [Parameter(Mandatory=$true)][string]$Url,
     [Parameter(Mandatory=$true)][string]$OutFile,
@@ -156,9 +156,9 @@ function Download-FileCompat {
 
   # 1) Prefer curl.exe if available (has robust timeouts & redirects)
   if (Test-Command -Name 'curl.exe') {
-    $args = @('-L','--fail','--max-time', $TimeoutSec.ToString(), '-o', $OutFile, $Url)
-    if ($SkipCertificateCheck) { $args = @('-k') + $args }
-    $p = Start-Process -FilePath 'curl.exe' -ArgumentList $args -NoNewWindow -PassThru -Wait
+    $curlArgs = @('-L','--fail','--max-time', $TimeoutSec.ToString(), '-o', $OutFile, $Url)
+    if ($SkipCertificateCheck) { $curlArgs = @('-k') + $curlArgs }
+    $p = Start-Process -FilePath 'curl.exe' -ArgumentList $curlArgs -NoNewWindow -PassThru -Wait
     if ($p.ExitCode -ne 0) { throw ("curl.exe failed with exit code {0}" -f $p.ExitCode) }
     if (-not (Test-Path $OutFile)) { throw "curl.exe reported success but file not found: $OutFile" }
     return
@@ -355,7 +355,7 @@ if (-not $SkipInstallMode) {
       $zipPath = Join-Path $InstallRoot 'caddy.zip'
 
       try {
-        Download-FileCompat -Url $zipUrl -OutFile $zipPath -TimeoutSec 180
+        Get-FileCompat -Url $zipUrl -OutFile $zipPath -TimeoutSec 180
       } catch {
         Write-Error "Failed to download Caddy from $zipUrl. Error: $_"
         exit 1
@@ -374,7 +374,7 @@ if (-not $SkipInstallMode) {
         $ghUrl = "https://github.com/caddyserver/caddy/releases/latest/download/caddy_windows_${arch}.zip"
         Write-Host ("==> Retrying with GitHub asset: {0}" -f $ghUrl) -ForegroundColor Yellow
         try {
-          Download-FileCompat -Url $ghUrl -OutFile $zipPath -TimeoutSec 180
+          Get-FileCompat -Url $ghUrl -OutFile $zipPath -TimeoutSec 180
         } catch {
           Write-Error ("Failed to download from GitHub: {0}" -f $_)
           exit 1
@@ -564,3 +564,5 @@ if (Test-TcpPortOpen -TargetHost '127.0.0.1' -TargetPort $AdminPort -TimeoutSec 
 
 # Final summary: echo chosen admin port
 Write-Host ("Admin API: http://127.0.0.1:{0}" -f $AdminPort) -ForegroundColor Cyan
+
+
