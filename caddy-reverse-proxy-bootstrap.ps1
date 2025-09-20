@@ -1,4 +1,4 @@
-﻿# Tally HTTPS Proxy bootstrapper
+# Tally HTTPS Proxy bootstrapper
 # ------------------------------
 # Installs Caddy via Webi, configures a local HTTPS endpoint on https://localhost:8443,
 # and reverse-proxies to Tally on http://127.0.0.1:9000.
@@ -488,6 +488,26 @@ Write-Host ("==> Admin API will listen on 127.0.0.1:{0}" -f $AdminPort) -Foregro
 }
 https://localhost:$ListenPort {
     tls internal
+
+    # --- CORS: allow cross-origin POST/OPTIONS from browsers ---
+    @preflight method OPTIONS
+    handle @preflight {
+        header Access-Control-Allow-Origin "*"
+        header Access-Control-Allow-Methods "GET, POST, OPTIONS"
+        header Access-Control-Allow-Headers "Content-Type, Authorization"
+        header Access-Control-Max-Age "86400"
+        header Vary "Origin"
+        respond "" 204
+    }
+
+    header {
+        Access-Control-Allow-Origin "*"
+        Access-Control-Allow-Methods "GET, POST, OPTIONS"
+        Access-Control-Allow-Headers "Content-Type, Authorization"
+        Access-Control-Expose-Headers "Content-Type, Content-Length"
+        Vary "Origin"
+    }
+
     reverse_proxy http://127.0.0.1:$TallyPort {
         transport http {
             versions 1.1
@@ -635,5 +655,3 @@ if (-not $didTrust) {
 
 # Final summary: echo chosen admin port
 Write-Host ("Admin API: http://127.0.0.1:{0}" -f $AdminPort) -ForegroundColor Cyan
-
-
