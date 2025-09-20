@@ -235,13 +235,19 @@ function Invoke-CaddyValidate {
     [Parameter(Mandatory=$true)][string]$ExePath,
     [Parameter(Mandatory=$true)][string]$ConfigPath
   )
-  $output = & $ExePath validate --config $ConfigPath --adapter caddyfile 2>&1
-  if ($LASTEXITCODE -ne 0) {
-    $msg = ($output | Out-String).Trim()
-    Write-Error ("Caddy config validation failed. Output:\n{0}" -f $msg)
-    exit 1
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    $output = & $ExePath validate --config $ConfigPath --adapter caddyfile 2>&1
+    if ($LASTEXITCODE -ne 0) {
+      $msg = ($output | Out-String).Trim()
+      Write-Error ("Caddy config validation failed. Output:\n{0}" -f $msg)
+      exit 1
+    }
+    Write-Host "==> Caddyfile validated successfully" -ForegroundColor Green
+  } finally {
+    $ErrorActionPreference = $prev
   }
-  Write-Host "==> Caddyfile validated successfully" -ForegroundColor Green
 }
 
 # Robust archive extraction across legacy systems
@@ -306,7 +312,6 @@ $ListenPort    = 8443
 $TallyPort     = 9000
 $RuleName      = 'Tally HTTPS Proxy (Caddy)'
 $WebiUrl       = 'https://webi.ms/caddy'
-$didTrust      = $false
 $didTrust      = $false
 
 # Possible locations Webi or other installers may place caddy.exe
